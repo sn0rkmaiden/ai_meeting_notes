@@ -1,0 +1,29 @@
+schema: '2.0'
+stages:
+  unpack:
+    cmd: tar -xzf data/cv-corpus-21.0-2025-03-14-ru.tar.gz -C data
+    deps:
+    - path: data/cv-corpus-21.0-2025-03-14-ru.tar.gz
+      hash: md5
+      md5: 287bb2401f967a47d86e8b7b5e9f4b03
+      size: 6899531386
+    outs:
+    - path: data/cv-corpus-21.0-2025-03-14
+      hash: md5
+      md5: 5ec9d356c3b24c35d56200ae6392932b.dir
+      size: 7214033117
+      nfiles: 198259
+  concat_cv:
+    cmd: papermill notebooks/generate_concat_cv.ipynb -
+    deps:
+    - path: data/cv-corpus-21.0-2025-03-14
+      hash: md5
+      md5: 5ec9d356c3b24c35d56200ae6392932b.dir
+      size: 7214033117
+      nfiles: 198259
+    outs:
+    - path: data/dev/concat-cv
+      hash: md5
+      md5: 0e321c82d0127cdc8e2ecbebc579a3f5.dir
+      size: 334719437
+      nfiles: 11

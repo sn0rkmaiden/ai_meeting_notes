@@ -1,0 +1,15 @@
+stages:
+  unpack:
+    cmd: tar -xzf data/cv-corpus-21.0-2025-03-14-ru.tar.gz -C data
+    deps:
+    - data/cv-corpus-21.0-2025-03-14-ru.tar.gz
+    outs:
+    - data/cv-corpus-21.0-2025-03-14:
+        cache: false
+        persist: true
+  concat_cv:
+    cmd: papermill notebooks/generate_concat_cv.ipynb -
+    deps:
+    - data/cv-corpus-21.0-2025-03-14
+    outs:
+    - data/dev/concat-cv

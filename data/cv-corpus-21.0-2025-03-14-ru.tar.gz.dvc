@@ -1,0 +1,6 @@
+outs:
+- md5: 287bb2401f967a47d86e8b7b5e9f4b03
+  size: 6899531386
+  hash: md5
+  path: cv-corpus-21.0-2025-03-14-ru.tar.gz
+  push: false
