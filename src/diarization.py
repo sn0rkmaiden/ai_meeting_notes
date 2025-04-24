@@ -1,5 +1,4 @@
 import gc
-
 import torch.cuda
 import whisperx
 import os

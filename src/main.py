@@ -4,7 +4,7 @@ import shutil
 import diarization
 import json
 
-diarizer = diarization.Diarizer()
+diarizer = diarization.Diarizer(device='cpu')
 
 def clean_text(text: str):
     return text.strip("«»‘’'\" ")
@@ -41,7 +41,7 @@ def segments_to_markdown(segments: list) -> str:
 
     clean_segments = join_segments(segments)
 
-    return "\n".join((f"# {segment["speaker"]}\n{segment["text"]}" for segment in clean_segments))
+    return "\n".join((f"# {segment['speaker']}\n{segment['text']}" for segment in clean_segments))
 
 # функция которая выведет результат нейронки в
 def transcribe_audio(filepath):
