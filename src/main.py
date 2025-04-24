@@ -4,7 +4,7 @@ import shutil
 import diarization
 import json
 
-diarizer = diarization.Diarizer(device='cpu')
+diarizer = diarization.Diarizer()
 
 def clean_text(text: str):
     return text.strip("«»‘’'\" ")
@@ -79,4 +79,4 @@ with gr.Blocks() as demo:
 
     record_btn.click(fn=handle_audio, inputs=audio_input, outputs=[text_output, download_output])
 
-demo.launch()
+demo.launch(share=True)
