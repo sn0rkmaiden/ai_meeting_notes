@@ -162,6 +162,12 @@ kombu==5.5.2
 label-studio==1.16.0
 label-studio-sdk==1.0.10
 launchdarkly-server-sdk==8.2.1
+langchain-openai
+langchain
+openai
+langchain-openai
+langchain-community
+langchainhub
 lightning==2.5.1
 lightning-utilities==0.14.3
 lockfile==0.12.2
