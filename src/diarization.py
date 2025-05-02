@@ -3,26 +3,17 @@ import json
 
 import torch.cuda
 import whisperx
-import os
 from pathlib import Path
-import torchaudio
-from torchaudio import functional as audio_func
 from sys import argv
 from tqdm import tqdm
 from dataclasses import dataclass
 import math
-
-sampling_rate = 16000
-
-
-def load_audio(file, target_sample_rate=sampling_rate):
-    tensor, sample_rate = torchaudio.load(file)
-
-    # torchaudio.load does not downmix audio
-    tensor = tensor.mean(dim=0, keepdim=True)
-
-    tensor /= tensor.abs().max()
-    return audio_func.resample(tensor, sample_rate, target_sample_rate).reshape((-1)).numpy()
+from omegaconf import OmegaConf
+from nemo.collections.asr.models import NeuralDiarizer
+import whisper_timestamped as whisper
+import pandas as pd
+from datetime import timedelta
+from subprocess import run
 
 
 @dataclass
@@ -34,7 +25,7 @@ class Phrase:
 
     @staticmethod
     def from_segment(segment: dict):
-        return Phrase(segment["start"], segment["end"], segment["text"], segment["speaker"])
+        return Phrase(segment["start"], segment["end"], segment["text"], segment.get("speaker", "NONE"))
 
 
 def clean_text(text: str):
@@ -93,34 +84,101 @@ def phrases_to_markdown(phrases: list[Phrase]) -> str:
     return "\n".join((f"# {phrase.speaker}\n{phrase.text}" for phrase in clean_phrases))
 
 
+def load_diarization(filename):
+    records = []
+    with open(filename) as f:
+        for num, line in enumerate(f.readlines()):
+            _, _, _, start, duration, _, _, speaker, _, _ = line.split()
+            start, duration = float(start), float(duration)
+            records += [(f"[{timedelta(seconds=start)} -> {timedelta(seconds=start + duration)}]",
+                         str(num),
+                         speaker,
+                         start,
+                         start + duration)]
+    return pd.DataFrame.from_records(records, columns=["segment", "label", "speaker", "start", "end"])
+
+
+def clean_run(model, runnable):
+    """
+    Enables machines with very low VRAM to run this script.
+    :param model: the model to upload to CUDA
+    :param runnable: the action to perform on model
+    :return: the result of runnable
+    """
+
+    model.to("cuda")
+    result = runnable(model)
+    model.to("cpu")
+    gc.collect()
+    torch.cuda.empty_cache()
+    print(torch.cuda.memory_summary())
+    return result
+
+
+def to_whisperx_aligned_transcript(result):
+    segments = []
+    word_segments = []
+
+    for segment in result["segments"]:
+        words = []
+        for word in segment["words"]:
+            words += [{"word": word["text"], "start": word["start"], "end": word["end"], "score": word["confidence"]}]
+        word_segments += words
+        segments += [{"start": segment["start"], "end": segment["end"], "text": segment["text"], "words": words}]
+
+    return {"segments": segments, "word_segments": word_segments}
+
+
 class Diarizer:
     def __init__(self,
-                 device="cuda",
-                 batch_size=1,
-                 compute_type="int8",
-                 whisper_arch="large-v3-turbo",
-                 language_code="ru"):
-        self.transcriber = whisperx.load_model(whisper_arch, device, compute_type=compute_type)
-        self.aligner, self.dictionary = whisperx.load_align_model(language_code=language_code, device=device)
-        self.diarizer = whisperx.DiarizationPipeline(use_auth_token=os.environ["HUGGING_FACE_TOKEN"], device=device)
-        self.batch_size = batch_size
-        self.device = device
+                 whisper_arch="openai/whisper-large-v3-turbo",
+                 language_code="ru",
+                 model_config="../src/nemo-config.yaml",
+                 input_manifest_file="input_manifest.json"):
+        config = OmegaConf.load(model_config)
+        self.diarizer = NeuralDiarizer(config).eval()
+
+        self.transcriber = whisper.load_model(whisper_arch, device="cpu", in_memory=True).eval()
+
+        self.input_manifest_file = input_manifest_file
         self.language_code = language_code
+        self.sample_rate = config.sample_rate
 
-    def diarize(self, audio: str | Path) -> list[Phrase]:
-        audio = load_audio(audio)
-        result = self.transcriber.transcribe(audio, batch_size=self.batch_size, language=self.language_code)
-        result = whisperx.align(result["segments"], self.aligner, self.dictionary, audio, self.device,
-                                return_char_alignments=False)
-        diarization = self.diarizer(audio)
-        result = whisperx.assign_word_speakers(diarization, result, fill_nearest=True)
-        phrases = [Phrase.from_segment(segment) for segment in result["segments"]]
+    def prepare_audio(self, audio_file: Path):
+        out_file = audio_file.name + ".wav"
 
-        del audio, result, diarization
-        gc.collect()
-        torch.cuda.empty_cache()
+        run(["ffmpeg", "-i", audio_file, "-y", "-ac", "1", "-r", str(self.sample_rate), out_file]).check_returncode()
 
-        return phrases
+        meta = {
+            'audio_filepath': out_file,
+            'offset': 0,
+            'label': 'infer',
+            'duration': None,
+            'rttm_filepath': None
+        }
+        with open(self.input_manifest_file, "w") as file:
+            json.dump(meta, file)
+            file.write("\n")
+
+    def diarize(self, audio: str) -> list[Phrase]:
+        with torch.no_grad():
+            audio_path = Path(audio)
+            self.prepare_audio(audio_path)
+
+            clean_run(self.diarizer, lambda d: d.diarize())
+            diarization = load_diarization(Path("pred_rttms") / (audio_path.name + ".rttm"))
+
+            voice = list(diarization[["start", "end"]].itertuples(index=False, name=None))
+
+            audio = whisper.load_audio(audio)
+            result = clean_run(self.transcriber,
+                               lambda t: whisper.transcribe_timestamped(t, audio, language=self.language_code,
+                                                                        vad=voice))
+            del audio
+
+            aligned_transcript = to_whisperx_aligned_transcript(result)
+        result = whisperx.assign_word_speakers(diarization, aligned_transcript, fill_nearest=False)
+        return [Phrase.from_segment(segment) for segment in result["segments"]]
 
 
 def phrases_to_json(phrases: list[Phrase]) -> str:

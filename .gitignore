@@ -9,3 +9,5 @@ data/**
 .venv
 
 **/__pycache__
+
+/run
