@@ -120,8 +120,10 @@ def to_whisperx_aligned_transcript(result):
     word_segments = []
 
     for segment in result["segments"]:
+        if not segment["text"] or segment["text"].isspace():
+            continue
         words = []
-        for word in segment["words"]:
+        for word in segment.get("words", []):
             words += [{"word": word["text"], "start": word["start"], "end": word["end"], "score": word["confidence"]}]
         word_segments += words
         segments += [{"start": segment["start"], "end": segment["end"], "text": segment["text"], "words": words}]
