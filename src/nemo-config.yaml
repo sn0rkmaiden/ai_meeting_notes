@@ -29,7 +29,7 @@ diarizer:
       smoothing: "median" # False or type of smoothing method (eg: median)
       overlap: 0.5 # Overlap ratio for overlapped mean/median smoothing filter
       onset: 0.1 # Onset threshold for detecting the beginning and end of a speech
-      offset: 0.08 # Offset threshold for detecting the end of a speech
+      offset: 0.1 # Offset threshold for detecting the end of a speech
       pad_onset: 0.1 # Adding durations before each speech segment
       pad_offset: 0.1 # Adding durations after each speech segment
       min_duration_on: 0 # Threshold for short speech segment deletion
