@@ -2,9 +2,13 @@
 
 **/.ipynb_checkpoints
 
-data/**
-
-!data/**/*.dvc
+data/**/*.wav
+data/**/*.csv
+data/**/*.tsv
+data/**/*.opus
+data/**/*.mp3
+data/**/*.json
+data/**/*.tar.gz
 
 .venv
 
