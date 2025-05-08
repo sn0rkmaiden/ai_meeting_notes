@@ -49,3 +49,18 @@
 git clone https://github.com/sn0rkmaiden/ai_meeting_notes.git
 cd ./ai_meeting_notes
 ```
+2️⃣ Установите зависимости:
+
+```
+pip install -r requirements.txt
+```
+
+3️⃣ Перейдите в директорию с кодом:
+```
+cd ./src
+```
+
+4️⃣ Запускаем main.py
+```
+python main.py
+```
