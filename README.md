@@ -64,3 +64,6 @@ cd ./src
 ```
 python main.py
 ```
+------
+## Полезные ссылки
+[Описание проекта на сайте реестра проектов СПбГУ](https://citec.spb.ru/projects/voice-assistant-2025)
