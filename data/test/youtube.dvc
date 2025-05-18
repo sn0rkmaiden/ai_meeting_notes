@@ -1,0 +1,6 @@
+outs:
+- md5: 2230f546be3f1303ea482654d0c55afd.dir
+  size: 1008244405
+  nfiles: 10
+  hash: md5
+  path: youtube

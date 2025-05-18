@@ -14,16 +14,15 @@ stages:
       size: 7214033117
       nfiles: 198259
   concat_cv:
-    cmd: papermill notebooks/generate_concat_cv.ipynb -
+    cmd: python src/generate-concat-cv.py
     deps:
-    - path: data/cv-corpus-21.0-2025-03-14
+    - path: src/generate-concat-cv.py
       hash: md5
-      md5: 5ec9d356c3b24c35d56200ae6392932b.dir
-      size: 7214033117
-      nfiles: 198259
+      md5: 573aae67009ea0e2340765952e0058e6
+      size: 3843
     outs:
     - path: data/dev/concat-cv
       hash: md5
-      md5: 0e321c82d0127cdc8e2ecbebc579a3f5.dir
-      size: 334719437
+      md5: 9edee88c385d90fe04fea9145beebbf8.dir
+      size: 353521300
       nfiles: 11

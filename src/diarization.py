@@ -1,8 +1,12 @@
 import gc
 import json
 
+from typing import Optional, Literal
+
+import pyannote.core
 import torch.cuda
-import whisperx
+import whisperx as wx
+import whisper_timestamped as td
 from pathlib import Path
 from sys import argv
 from tqdm import tqdm
@@ -10,10 +14,12 @@ from dataclasses import dataclass
 import math
 from omegaconf import OmegaConf
 from nemo.collections.asr.models import NeuralDiarizer
-import whisper_timestamped as whisper
 import pandas as pd
 from datetime import timedelta
 from subprocess import run
+import re
+import numpy as np
+from pyannote.core import Annotation, Segment, SlidingWindowFeature, SlidingWindow
 
 
 @dataclass
@@ -24,8 +30,12 @@ class Phrase:
     speaker: str
 
     @staticmethod
-    def from_segment(segment: dict):
-        return Phrase(segment["start"], segment["end"], segment["text"], segment.get("speaker", "NONE"))
+    def from_segment(segment: dict, speaker_format="Speaker {}"):
+        if "speaker" in segment:
+            speaker = speaker_format.format(re.match("speaker_(\\d+)", segment["speaker"]).group(1))
+        else:
+            speaker = "None"
+        return Phrase(segment["start"], segment["end"], segment["text"], speaker)
 
 
 def clean_text(text: str):
@@ -133,23 +143,48 @@ def to_whisperx_aligned_transcript(result):
 
 class Diarizer:
     def __init__(self,
-                 whisper_arch="openai/whisper-large-v3-turbo",
-                 language_code="ru",
-                 model_config="../src/nemo-config.yaml",
-                 input_manifest_file="input_manifest.json"):
-        config = OmegaConf.load(model_config)
-        self.diarizer = NeuralDiarizer(config).eval()
+                 # Maybe try dvislobokov/whisper-large-v3-turbo-russian later
+                 whisper_arch: str = "large-v3-turbo",
+                 alignment: Literal["timestamped", "whisperx"] = "timestamped",
+                 language_code: str = "ru",
+                 model_config: str = "../src/nemo-config.yaml",
+                 input_manifest_file: str = "input_manifest.json",
+                 speaker_format: str = "Speaker {}",
+                 beam_size: Optional[int] = None,
+                 dtype: str = "float32",
+                 batch_size: int = 1):
+        self.config = OmegaConf.load(model_config)
+        self.diarizer = NeuralDiarizer(self.config).eval()
 
-        self.transcriber = whisper.load_model(whisper_arch, device="cpu", in_memory=True).eval()
+        self.alignment = alignment
+        self.whisper_arch = whisper_arch
+
+        match alignment:
+            case "timestamped":
+                self.transcriber = td.load_model(whisper_arch, device="cpu", in_memory=True).eval()
+            case "whisperx":
+                self.aligner, self.meta = wx.load_align_model(language_code, "cpu")
 
         self.input_manifest_file = input_manifest_file
         self.language_code = language_code
-        self.sample_rate = config.sample_rate
+        self.sample_rate = self.config.sample_rate
+
+        self.speaker_format = speaker_format
+        self.beam_size = beam_size
+        self.dtype = dtype
+        self.batch_size = batch_size
 
     def prepare_audio(self, audio_file: Path):
         out_file = audio_file.name + ".wav"
 
-        run(["ffmpeg", "-i", audio_file, "-y", "-ac", "1", "-r", str(self.sample_rate), out_file]).check_returncode()
+        run(["ffmpeg",
+             "-i", audio_file,
+             "-y",
+             # "-f", "s16le",
+             "-ac", "1",
+             "-ar", str(self.sample_rate),
+             # "-acodec", "pcm_s16le",
+             out_file]).check_returncode()
 
         meta = {
             'audio_filepath': out_file,
@@ -162,25 +197,61 @@ class Diarizer:
             json.dump(meta, file)
             file.write("\n")
 
-    def diarize(self, audio: str) -> list[Phrase]:
+        return out_file
+
+    def load_vad_frame(self, filename):
+        with open(filename) as fd:
+            lines = [float(line) for line in fd.readlines()]
+        step = self.config.diarizer.vad.parameters.shift_length_in_sec
+        window = self.config.diarizer.vad.parameters.window_length_in_sec
+        return SlidingWindowFeature(np.array(lines).reshape((-1, 1)), SlidingWindow(window, step))
+
+    def diarize(self, audio: str) -> tuple[Annotation, list[Phrase]]:
         with torch.no_grad():
-            audio_path = Path(audio)
-            self.prepare_audio(audio_path)
+            source_audio = Path(audio)
+            wav_audio = self.prepare_audio(source_audio)
+
+            with open(wav_audio, "rb") as fd:
+                audio = np.frombuffer(fd.read(), np.int16).flatten()[22:].astype(np.float32) / 32768.0
+                print(audio.max())
 
             clean_run(self.diarizer, lambda d: d.diarize())
-            diarization = load_diarization(Path("pred_rttms") / (audio_path.name + ".rttm"))
+            diarization = load_diarization(Path("pred_rttms") / (source_audio.name + ".rttm"))
 
-            voice = list(diarization[["start", "end"]].itertuples(index=False, name=None))
+            match self.alignment:
+                case "timestamped":
+                    voice = list(diarization[["start", "end"]].itertuples(index=False, name=None))
+                    options = dict(language=self.language_code, beam_size=self.beam_size)
+                    result = clean_run(self.transcriber,
+                                       lambda t: td.transcribe_timestamped(t, audio, vad=voice, **options))
+                    aligned_transcript = to_whisperx_aligned_transcript(result)
+                case "whisperx":
+                    options = dict(language=self.language_code)
+                    # vad_frame = self.load_vad_frame(Path("vad_outputs") / (source_audio.name + ".frame"))
+                    # vad_params = dict(vad_onset=self.config.diarizer.vad.parameters.onset,
+                    #                   vad_offset=self.config.diarizer.vad.parameters.offset)
+                    transcriber = wx.load_model(self.whisper_arch,
+                                                device="cuda",
+                                                compute_type=self.dtype,
+                                                asr_options=dict(beam_size=self.beam_size),
+                                                # vad_model=lambda ignored: vad_frame,
+                                                # vad_options=vad_params,
+                                                language=self.language_code)
+                    result = transcriber.transcribe(audio, language=self.language_code)
+                    del transcriber
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    print(torch.cuda.memory_summary())
+                    aligned_transcript = clean_run(self.aligner,
+                                                   lambda t: wx.align(result["segments"], t, self.meta, audio, "cuda"))
 
-            audio = whisper.load_audio(audio)
-            result = clean_run(self.transcriber,
-                               lambda t: whisper.transcribe_timestamped(t, audio, language=self.language_code,
-                                                                        vad=voice))
-            del audio
+        result = wx.assign_word_speakers(diarization, aligned_transcript, fill_nearest=False)
 
-            aligned_transcript = to_whisperx_aligned_transcript(result)
-        result = whisperx.assign_word_speakers(diarization, aligned_transcript, fill_nearest=False)
-        return [Phrase.from_segment(segment) for segment in result["segments"]]
+        annotations = Annotation()
+        for ind, row in diarization.iterrows():
+            annotations[Segment(row["start"], row["end"])] = row["speaker"]
+
+        return annotations, [Phrase.from_segment(segment, self.speaker_format) for segment in result["segments"]]
 
 
 def phrases_to_json(phrases: list[Phrase]) -> str:
@@ -211,7 +282,42 @@ def phrases_to_label_studio_json(phrases: list[Phrase], audio_path) -> str:
                       ensure_ascii=False)
 
 
-if __name__ == "__main__":
+def label_studio_json_to_phrases(path) -> dict[str, tuple[list[Phrase], float]]:
+    result = {}
+
+    with open(path) as fd:
+        data = json.load(fd)
+
+    for obj in data:
+        audio_path = obj["data"]["audio"]
+
+        time = {}
+        texts = {}
+        speakers = {}
+        original_length = 0
+
+        for annotation in obj["annotations"][0]["result"]:
+            value = annotation["value"]
+            original_length = annotation["original_length"]
+            match annotation["from_name"]:
+                case "labels":
+                    time[annotation["id"]] = (value["start"], value["end"])
+                    speakers[annotation["id"]] = value["labels"][0]
+                case "transcription":
+                    time[annotation["id"]] = (value["start"], value["end"])
+                    texts[annotation["id"]] = re.sub(" +", " ", " ".join(value["text"]))
+
+        phrases = []
+
+        for (start, end), text, speaker in zip(*([d[key] for key in time.keys()] for d in [time, texts, speakers])):
+            phrases += [Phrase(start, end, text, speaker)]
+
+        result[audio_path] = (phrases, original_length)
+
+    return result
+
+
+def main():
     infiles = argv[1:]
     bar = tqdm(infiles)
     diarizer = Diarizer()
@@ -221,3 +327,7 @@ if __name__ == "__main__":
         segments = diarizer.diarize(infile)
         with open(outfile, "w") as out:
             out.write(phrases_to_label_studio_json(segments, infile))
+
+
+if __name__ == "__main__":
+    main()

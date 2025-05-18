@@ -20,7 +20,7 @@ def handle_audio(audio_record: Optional[str], audio_upload: Optional[str], progr
 
     progress(0, "🔍 Анализ аудио...")
 
-    phrases = diarizer.diarize(new_path)
+    annotation, phrases = diarizer.diarize(new_path)
 
     md = diarization.phrases_to_markdown(phrases)
 
@@ -190,7 +190,4 @@ with gr.Blocks(title="Аудио Анализатор", theme=gr.themes.Soft(), 
     )
 
 if __name__ == "__main__":
-    try:
-        demo.queue(concurrency_count=4).launch(server_port=7860)
-    except TypeError:
-        demo.queue().launch(server_port=7860)
+    demo.queue().launch(server_port=7860, share=True)
