@@ -9,13 +9,13 @@ SYSTEM_PROMPT = """Ты - виртуальный помощник. Подвед�
 
 class Summarizer:
     def __init__(self,
-                 model="llama-lite",
+                 model="yandexgpt",
                  folder_id=os.environ["YANDEX_FOLDER_ID"],
                  api_key=os.environ["YANDEX_API_KEY"],
-                 temperature=0.5,
+                 temperature=0,
                  system_prompt=SYSTEM_PROMPT):
         self.sdk = YCloudML(folder_id=folder_id, auth=api_key)
-        self.model = self.sdk.models.completions(model).configure(temperature=temperature)
+        self.model = self.sdk.models.completions(model, model_version="rc").configure(temperature=temperature)
         self.system_prompt = system_prompt
 
     def summarize(self, transcript):

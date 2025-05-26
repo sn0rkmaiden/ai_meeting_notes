@@ -1,5 +1,6 @@
 import gc
 import json
+import os
 
 from typing import Optional, Literal
 
@@ -108,23 +109,6 @@ def load_diarization(filename):
     return pd.DataFrame.from_records(records, columns=["segment", "label", "speaker", "start", "end"])
 
 
-def clean_run(model, runnable):
-    """
-    Enables machines with very low VRAM to run this script.
-    :param model: the model to upload to CUDA
-    :param runnable: the action to perform on model
-    :return: the result of runnable
-    """
-
-    model.to("cuda")
-    result = runnable(model)
-    model.to("cpu")
-    gc.collect()
-    torch.cuda.empty_cache()
-    print(torch.cuda.memory_summary())
-    return result
-
-
 def to_whisperx_aligned_transcript(result):
     segments = []
     word_segments = []
@@ -152,18 +136,21 @@ class Diarizer:
                  speaker_format: str = "Speaker {}",
                  beam_size: Optional[int] = None,
                  dtype: str = "float32",
-                 batch_size: int = 1):
+                 batch_size: int = 1,
+                 minimize_vram_usage: bool = int(os.environ.get("MINIMIZE_VRAM_USAGE", "0")) != 0):
         self.config = OmegaConf.load(model_config)
         self.diarizer = NeuralDiarizer(self.config).eval()
 
         self.alignment = alignment
         self.whisper_arch = whisper_arch
 
+        parking_device = "cpu" if minimize_vram_usage else "cuda"
+
         match alignment:
             case "timestamped":
-                self.transcriber = td.load_model(whisper_arch, device="cpu", in_memory=True).eval()
+                self.transcriber = td.load_model(whisper_arch, device=parking_device, in_memory=True).eval()
             case "whisperx":
-                self.aligner, self.meta = wx.load_align_model(language_code, "cpu")
+                self.aligner, self.meta = wx.load_align_model(language_code, parking_device)
 
         self.input_manifest_file = input_manifest_file
         self.language_code = language_code
@@ -173,6 +160,26 @@ class Diarizer:
         self.beam_size = beam_size
         self.dtype = dtype
         self.batch_size = batch_size
+        self.minimize_vram_usage = minimize_vram_usage
+
+    def clean_run(self, model, runnable):
+        """
+        Enables machines with very low VRAM to run this script.
+        :param model: the model to upload to CUDA
+        :param runnable: the action to perform on model
+        :return: the result of runnable
+        """
+
+        if self.minimize_vram_usage:
+            model.to("cuda")
+            result = runnable(model)
+            model.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+        else:
+            result = runnable(model)
+        print(torch.cuda.memory_summary())
+        return result
 
     def prepare_audio(self, audio_file: Path):
         out_file = audio_file.name + ".wav"
@@ -206,7 +213,7 @@ class Diarizer:
         window = self.config.diarizer.vad.parameters.window_length_in_sec
         return SlidingWindowFeature(np.array(lines).reshape((-1, 1)), SlidingWindow(window, step))
 
-    def diarize(self, audio: str) -> tuple[Annotation, list[Phrase]]:
+    def diarize(self, audio: str, annotation: Optional[Annotation] = None) -> tuple[Annotation, list[Phrase]]:
         with torch.no_grad():
             source_audio = Path(audio)
             wav_audio = self.prepare_audio(source_audio)
@@ -215,15 +222,20 @@ class Diarizer:
                 audio = np.frombuffer(fd.read(), np.int16).flatten()[22:].astype(np.float32) / 32768.0
                 print(audio.max())
 
-            clean_run(self.diarizer, lambda d: d.diarize())
+            if annotation is not None:
+                with open(Path("pred_rttms") / (source_audio.name + ".rttm"), "w") as fd:
+                    annotation.write_rttm(fd)
+            else:
+                self.clean_run(self.diarizer, lambda d: d.diarize())
+
             diarization = load_diarization(Path("pred_rttms") / (source_audio.name + ".rttm"))
 
             match self.alignment:
                 case "timestamped":
                     voice = list(diarization[["start", "end"]].itertuples(index=False, name=None))
                     options = dict(language=self.language_code, beam_size=self.beam_size)
-                    result = clean_run(self.transcriber,
-                                       lambda t: td.transcribe_timestamped(t, audio, vad=voice, **options))
+                    result = self.clean_run(self.transcriber,
+                                            lambda t: td.transcribe_timestamped(t, audio, vad=voice, **options))
                     aligned_transcript = to_whisperx_aligned_transcript(result)
                 case "whisperx":
                     options = dict(language=self.language_code)
@@ -242,8 +254,9 @@ class Diarizer:
                     gc.collect()
                     torch.cuda.empty_cache()
                     print(torch.cuda.memory_summary())
-                    aligned_transcript = clean_run(self.aligner,
-                                                   lambda t: wx.align(result["segments"], t, self.meta, audio, "cuda"))
+                    aligned_transcript = self.clean_run(self.aligner,
+                                                        lambda t: wx.align(result["segments"], t, self.meta, audio,
+                                                                           "cuda"))
 
         result = wx.assign_word_speakers(diarization, aligned_transcript, fill_nearest=False)
 
@@ -260,26 +273,50 @@ def phrases_to_json(phrases: list[Phrase]) -> str:
          phrases], ensure_ascii=False)
 
 
-def phrases_to_label_studio_json(phrases: list[Phrase], audio_path) -> str:
-    result = []
-    speakers = dict()
-    for id, annotation in enumerate(phrases):
-        speaker = annotation.speaker
-        if speaker not in speakers:
-            speakers[speaker] = len(speakers) + 1
-        result += [
-            {"value": {"start": annotation.start, "end": annotation.end, "labels": [f"Speaker {speakers[speaker]}"]},
-             "from_name": "labels",
-             "to_name": "audio",
-             "type": "labels",
-             "id": str(id)},
-            {"value": {"start": annotation.start, "end": annotation.end, "text": [annotation.text]},
-             "from_name": "transcription",
-             "to_name": "audio",
-             "type": "textarea",
-             "id": str(id)}]
-    return json.dumps([{"data": {"audio": audio_path}, "id": 1, "predictions": [{"result": result}]}],
-                      ensure_ascii=False)
+def phrases_to_label_studio_json(data: dict[str, list[Phrase]]) -> str:
+    outer_list = []
+    for audio_path, phrases in data.items():
+        result = []
+        speakers = dict()
+        for id, annotation in enumerate(phrases):
+            speaker = annotation.speaker
+            if speaker not in speakers:
+                speakers[speaker] = len(speakers) + 1
+            result += [
+                {"value": {"start": annotation.start, "end": annotation.end, "labels": [f"Speaker {speakers[speaker]}"]},
+                 "from_name": "labels",
+                 "to_name": "audio",
+                 "type": "labels",
+                 "id": str(id)},
+                {"value": {"start": annotation.start, "end": annotation.end, "text": [annotation.text]},
+                 "from_name": "transcription",
+                 "to_name": "audio",
+                 "type": "textarea",
+                 "id": str(id)}]
+        outer_list += [{"data": {"audio": audio_path}, "id": 1, "predictions": [{"result": result}]}]
+    return json.dumps(outer_list, ensure_ascii=False)
+
+
+def labal_studio_json_to_annotation(path) -> dict[str, tuple[Annotation, float]]:
+    result = {}
+
+    with open(path) as fd:
+        data = json.load(fd)
+
+    for obj in data:
+        audio_path = obj["data"]["audio"]
+        ann = Annotation()
+        original_length = 0
+
+        for annotation in obj["annotations"][0]["result"]:
+            value = annotation["value"]
+            original_length = annotation["original_length"]
+            if annotation["from_name"] == "labels":
+                ann[Segment(value["start"], value["end"])] = value["labels"][0]
+
+        result[audio_path] = (ann, original_length)
+
+    return result
 
 
 def label_studio_json_to_phrases(path) -> dict[str, tuple[list[Phrase], float]]:
@@ -322,11 +359,20 @@ def main():
     bar = tqdm(infiles)
     diarizer = Diarizer()
     for infile in bar:
+        data = {}
         bar.set_postfix(current_file=infile)
-        outfile = infile + ".json"
-        segments = diarizer.diarize(infile)
+        if infile.endswith(".json"):
+            for path, (annotation, orig_len) in labal_studio_json_to_annotation(infile).items():
+                print("Loaded annotation")
+                _, segments = diarizer.diarize(str(Path(infile).parent / path), annotation=annotation)
+                data[path] = segments
+            outfile = infile[:-5] + ".new.json"
+        else:
+            outfile = infile + ".json"
+            annotation, segments = diarizer.diarize(infile)
+            data[infile] = segments
         with open(outfile, "w") as out:
-            out.write(phrases_to_label_studio_json(segments, infile))
+            out.write(phrases_to_label_studio_json(data))
 
 
 if __name__ == "__main__":
